@@ -3074,7 +3074,7 @@ def invoices_window():
                 show_success_message(f'Invoice #{inv_id} created successfully')
                 load_invoices()
                 # Clear form
-                b_id.delete(0, tk.END)
+                bid.delete(0, tk.END)
             except ValueError:
                 show_error_message('Invalid booking ID format')
             except Exception as e:
@@ -3519,7 +3519,7 @@ def report_maintenance_issue(callback=None):
             show_success_message("Issue reported successfully")
             # Clear form
             room.set('')
-            issue_t_var.set('')
+            issue_type.set('')
             desc_text.delete("1.0", tk.END)
             if callback:
                 callback()
@@ -3613,7 +3613,7 @@ def restaurant_window():
                 load_orders()
                 # Clear form
                 room_entry.delete(0, tk.END)
-                items_text.delete("1.0", tk.END)
+                items_entry.delete(0, tk.END)
                 status_var.set('')
                 price_entry.delete(0, tk.END)
             except ValueError:
