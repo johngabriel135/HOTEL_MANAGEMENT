@@ -17,6 +17,8 @@ import cv2
 import numpy as np
 import pickle
 import json
+import requests
+import threading
 
 # ===== FACE RECOGNITION SETUP =====
 try:
@@ -146,13 +148,17 @@ def recognize_face():
                 for user_file in os.listdir(FACE_DB_DIR):
                     if user_file.endswith('_face.npy'):
                         username = user_file.replace('_face.npy', '')
-                        stored_encoding = np.load(os.path.join(FACE_DB_DIR, user_file))
-                        distance = np.linalg.norm(current_encoding - stored_encoding)
+                        try:
+                            stored_encoding = np.load(os.path.join(FACE_DB_DIR, user_file))
+                            distance = np.linalg.norm(current_encoding - stored_encoding)
+                            
+                            # If distance is below threshold (0.3), it's a match
+                            if distance < 0.3 and distance < best_distance:
+                                best_match = username
+                                best_distance = distance
                         
-                        # If distance is below threshold (0.3), it's a match
-                        if distance < 0.3 and distance < best_distance:
-                            best_match = username
-                            best_distance = distance
+                        except Exception:
+                            pass
                 
                 cap.release()
                 cv2.destroyAllWindows()
@@ -200,7 +206,6 @@ current_user_role = None
 open_windows = []
 _kpi_refresh_job = None
 kpi_labels = {}
-chat_ui = {}
 _poll_job = None
 
 
@@ -256,48 +261,8 @@ def start_polling(interval_ms=2000):
                 conn.commit()
         except Exception:
             pass
-        # update chat UI if open
-        try:
-            ulist = chat_ui.get('users_listbox')
-            if ulist:
-                ulist.delete(0, 'end')
-                cursor.execute("SELECT username, role, last_active FROM users")
-                for u in cursor.fetchall():
-                    last_dt = None
-                    if u[2]:
-                        try:
-                            last_dt = datetime.datetime.fromisoformat(u[2])
-                        except Exception:
-                            last_dt = None
-                    status_icon = '🔴'
-                    try:
-                        if last_dt:
-                            delta = (datetime.datetime.utcnow() - last_dt).total_seconds()
-                            if delta <= 180:
-                                status_icon = '🟢'
-                    except Exception:
-                        status_icon = '🔴'
-                    last = get_relative_time(last_dt) if last_dt else 'never'
-                    ulist.insert('end', f"{status_icon} {u[0]} ({u[1]}) - {last}")
-            # refresh messages for open convo
-            if chat_ui.get('current_target') and chat_ui.get('messages_box'):
-                target = chat_ui['current_target']
-                msgs = get_conversation(current_user, target)
-                mb = chat_ui['messages_box']
-                mb.config(state='normal'); mb.delete('1.0','end')
-                for m in msgs:
-                    ts = m[3]
-                    try:
-                        dt = datetime.datetime.fromisoformat(ts)
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=datetime.timezone.utc)
-                        ts_display = dt.astimezone(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S GMT')
-                    except Exception:
-                        ts_display = ts
-                    mb.insert('end', f"{m[0]}: {m[2]} ({ts_display})\n")
-                mb.config(state='disabled')
-        except Exception:
-            pass
+        # chat functionality removed
+        pass
         try:
             _poll_job = root.after(interval_ms, _tick)
         except Exception:
@@ -354,7 +319,7 @@ conn.commit()
 
 # invoices table
 cursor.execute('''CREATE TABLE IF NOT EXISTS invoices (
-    id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
     booking_id TEXT,
     guest_name TEXT,
     amount REAL,
@@ -362,6 +327,7 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS invoices (
     created_at TEXT
 )
 ''')
+
 conn.commit()
 
 # settings table for app preferences
@@ -443,6 +409,18 @@ for room in default_rooms:
                        (room[1], room[2], room[3], room[0]))
         conn.commit()
         
+# create the guests table (for guest profiles)
+cursor.execute("""CREATE TABLE IF NOT EXISTS guests (
+    guest_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guest_name TEXT NOT NULL UNIQUE,
+    phone TEXT,
+    email TEXT,
+    address TEXT,
+    created_at TEXT NOT NULL
+    )
+    """)
+conn.commit()
+
 # create the guest bookings table
 cursor.execute ("""CREATE TABLE IF NOT EXISTS guest_bookings (
     booking_id TEXT PRIMARY KEY,
@@ -510,16 +488,94 @@ cursor.execute("""CREATE TABLE IF NOT EXISTS reviews (
     )
     """)
 
+# Create housekeeping tasks table
+cursor.execute("""CREATE TABLE IF NOT EXISTS housekeeping_tasks (
+    task_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_number INTEGER NOT NULL,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    notes TEXT,
+    FOREIGN KEY (room_number) REFERENCES user_rooms (room_number)
+    )
+    """)
+
+# Create maintenance issues table
+cursor.execute("""CREATE TABLE IF NOT EXISTS maintenance_issues (
+    issue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_number INTEGER,
+    issue_type TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reported_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    FOREIGN KEY (room_number) REFERENCES user_rooms (room_number)
+    )
+    """)
+
+# Create customer feedback table
+cursor.execute("""CREATE TABLE IF NOT EXISTS customer_feedback (
+    feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    booking_id TEXT NOT NULL,
+    guest_name TEXT NOT NULL,
+    feedback_type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    rating INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (booking_id) REFERENCES guest_bookings (booking_id)
+    )
+    """)
+
+# Create loyalty members table
+cursor.execute("""CREATE TABLE IF NOT EXISTS loyalty_members (
+    member_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guest_name TEXT UNIQUE NOT NULL,
+    tier TEXT NOT NULL,
+    points INTEGER DEFAULT 0,
+    amount_spent REAL DEFAULT 0,
+    joined_date TEXT NOT NULL
+    )
+    """)
+
+# Create loyalty offers table
+cursor.execute("""CREATE TABLE IF NOT EXISTS loyalty_offers (
+    offer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    offer_name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    discount_percentage REAL NOT NULL,
+    valid_for_tier TEXT NOT NULL,
+    active INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL
+    )
+    """)
+
+# Create stay duration table for tracking receptionist hours
+cursor.execute("""CREATE TABLE IF NOT EXISTS receptionist_shifts (
+    shift_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receptionist_name TEXT NOT NULL,
+    check_in_time TEXT NOT NULL,
+    check_out_time TEXT,
+    duration_hours INTEGER DEFAULT 0
+    )
+    """)
+
 conn.commit()
 
 # function to get current time
 def get_current_time():
     return strftime("%Y-%m-%d %H:%M:%S")
 
+def get_iso_timestamp():
+    """Generate ISO format timestamp without milliseconds"""
+    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+
 # function to generate a unique booking ID using UUID
 def generate_booking_id():
     """Generate a 6-digit numeric booking ID"""
-    import random
+
     # Generate random 6-digit number
     booking_id = str(random.randint(100000, 999999))
     # Ensure it's unique in database
@@ -597,9 +653,9 @@ def update_guest(guest_name, room_number, check_in_date, check_out_date, status,
         return False
 
 def delete_guest(guest_name):
-    """Delete a guest booking"""
+    """Delete a guest profile"""
     try:
-        cursor.execute("DELETE FROM guest_bookings WHERE guest_name = ?", (guest_name,))
+        cursor.execute("DELETE FROM guests WHERE guest_name = ?", (guest_name,))
         conn.commit()
         show_success_message("Guest deleted successfully")
         return True
@@ -608,9 +664,9 @@ def delete_guest(guest_name):
         return False
 
 def get_all_guests():
-    """Retrieve all guest bookings"""
+    """Retrieve all guest profiles"""
     try:
-        cursor.execute("SELECT * FROM guest_bookings")
+        cursor.execute("SELECT * FROM guests ORDER BY created_at DESC")
         return cursor.fetchall()
     except Exception as e:
         show_error_message(f"Error retrieving guests: {str(e)}")
@@ -768,14 +824,6 @@ def get_relative_time(dt):
     years = months // 12
     return f"{years}y ago"
 
-def send_message(sender, receiver, message_text):
-    ts = datetime.datetime.utcnow().isoformat()
-    try:
-        cursor.execute("INSERT INTO messages (sender, receiver, message, timestamp) VALUES (?, ?, ?, ?)", (sender, receiver, message_text, ts))
-        conn.commit()
-    except Exception as e:
-        show_error_message(f"Error sending message: {e}")
-
 def get_conversation(user1, user2):
     try:
         cursor.execute("SELECT sender, receiver, message, timestamp FROM messages WHERE (sender=? AND receiver=?) OR (receiver=? AND sender=?) ORDER BY timestamp ASC", (user1, user2, user2, user1))
@@ -784,10 +832,14 @@ def get_conversation(user1, user2):
         return []
 
 def create_notification(username, message_text):
-    ts = datetime.datetime.utcnow().isoformat()
+    ts = get_iso_timestamp()
     try:
-        cursor.execute("INSERT INTO notifications (username, message, created_at) VALUES (?, ?, ?)", (username, message_text, ts))
-        conn.commit()
+        # Use a fresh DB connection to avoid threading issues
+        conn_local = connect_to_database()
+        cur_local = conn_local.cursor()
+        cur_local.execute("INSERT INTO notifications (username, message, created_at) VALUES (?, ?, ?)", (username, message_text, ts))
+        conn_local.commit()
+        conn_local.close()
         # increment badge if current user
         if username == current_user:
             notif_count_var.set(notif_count_var.get() + 1)
@@ -963,21 +1015,135 @@ def get_unread_notifications(username):
 
 def show_notifications_window():
     nw = tk.Toplevel(root)
-    nw.title("Notifications")
-    nw.geometry("400x400")
-    notifs = get_unread_notifications(current_user)
-    if not notifs:
-        tk.Label(nw, text="No new notifications").pack(pady=20)
-        return
-    for n in notifs:
-        tk.Label(nw, text=f"{n[1]} - {n[2]}", wraplength=380, justify="left").pack(anchor="w", padx=10, pady=5)
-    # mark all as read
+    register_window(nw)
+    nw.title("🔔 Notifications")
+    nw.geometry("700x600")
+    nw.configure(bg="#f4f6f8")
+    
+    # Mark all notifications as read immediately when window opens
     try:
         cursor.execute("UPDATE notifications SET is_read=1 WHERE username=?", (current_user,))
         conn.commit()
+        # Reset notification count badge
         notif_count_var.set(0)
     except Exception:
         pass
+    
+    # Header with refresh button
+    header_frame = tk.Frame(nw, bg="#112439")
+    header_frame.pack(fill="x", padx=0, pady=0)
+    
+    tk.Label(header_frame, text="Notifications", font=("segoe ui", 14, "bold"), 
+             bg="#112439", fg=COLOR_GOLD).pack(side="left", padx=15, pady=10)
+    
+    def refresh_notifications():
+        # Clear and reload
+        for widget in notif_list_frame.winfo_children():
+            widget.destroy()
+        load_all_notifications()
+    
+    tk.Button(header_frame, text="🔄 Refresh", command=refresh_notifications, 
+              bg="#2196F3", fg="white", font=("segoe ui", 10), relief="flat", 
+              cursor="hand2", padx=10).pack(side="right", padx=10, pady=10)
+    
+    # Main notifications list with scrollbar
+    canvas = tk.Canvas(nw, bg="#f4f6f8", highlightthickness=0)
+    scrollbar = tk.Scrollbar(nw, orient="vertical", command=canvas.yview)
+    notif_list_frame = tk.Frame(canvas, bg="#f4f6f8")
+    
+    notif_list_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=notif_list_frame, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+    scrollbar.pack(side="right", fill="y")
+    
+    # Add mousewheel scrolling support
+    def _on_mousewheel_notif(event):
+        canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+    
+    canvas.bind_all("<MouseWheel>", _on_mousewheel_notif)
+    
+    def delete_notification(notif_id):
+        try:
+            cursor.execute("DELETE FROM notifications WHERE id=?", (notif_id,))
+            conn.commit()
+            refresh_notifications()
+        except Exception as e:
+            show_error_message(f"Error: {str(e)}")
+    
+    def mark_as_read(notif_id):
+        try:
+            cursor.execute("UPDATE notifications SET is_read=1 WHERE id=?", (notif_id,))
+            conn.commit()
+            refresh_notifications()
+        except Exception:
+            pass
+    
+    def load_all_notifications():
+        try:
+            # Filter out chat messages - only show system notifications (not from 💬 messages)
+            cursor.execute("SELECT id, message, created_at, is_read FROM notifications WHERE username=? AND message NOT LIKE '💬%' ORDER BY created_at DESC", (current_user,))
+            notifs = cursor.fetchall()
+            
+            if not notifs:
+                tk.Label(notif_list_frame, text="No notifications", font=("segoe ui", 11), 
+                        bg="#f4f6f8", fg="#999999").pack(pady=20)
+                return
+            
+            for notif_id, msg, created_at, is_read in notifs:
+                # Parse timestamp without milliseconds
+                try:
+                    dt = datetime.datetime.fromisoformat(created_at)
+                    ts_display = dt.strftime("%H:%M:%S")
+                except Exception:
+                    ts_display = created_at
+                
+                # Create notification card with border
+                notif_card = tk.Frame(notif_list_frame, bg="white", relief="solid", bd=1, highlightthickness=1)
+                notif_card.pack(fill="x", pady=6, padx=5)
+                
+                # Content area
+                content_frame = tk.Frame(notif_card, bg="white")
+                content_frame.pack(fill="both", expand=True, padx=10, pady=10)
+                
+                # Message with bold text
+                msg_label = tk.Label(content_frame, text=msg, font=("segoe ui", 10, "bold"), 
+                                    bg="white", justify="left", wraplength=450)
+                msg_label.pack(anchor="w", pady=(0, 5))
+                
+                # Timestamp and read status
+                info_frame = tk.Frame(content_frame, bg="white")
+                info_frame.pack(fill="x")
+                
+                read_status = "✓" if is_read else "0"
+                read_color = "#999999" if is_read else "#FF5722"
+                read_font = ("segoe ui", 9, "italic")
+                
+                tk.Label(info_frame, text=f"📅 {ts_display}", font=read_font, 
+                        bg="white", fg="#666666").pack(side="left", padx=(0, 20))
+                
+                tk.Label(info_frame, text=f"Status: {read_status}", font=("segoe ui", 9, "bold"), 
+                        bg="white", fg=read_color).pack(side="left", padx=(0, 20))
+                
+                # Action buttons
+                btn_frame = tk.Frame(content_frame, bg="white")
+                btn_frame.pack(fill="x", pady=(10, 0))
+                
+                if not is_read:
+                    tk.Button(btn_frame, text="Mark Read", command=lambda nid=notif_id: mark_as_read(nid),
+                             bg="#4CAF50", fg="white", font=("segoe ui", 9), relief="flat",
+                             cursor="hand2", padx=8, pady=3).pack(side="left", padx=(0, 5))
+                
+                tk.Button(btn_frame, text="Delete", command=lambda nid=notif_id: delete_notification(nid),
+                         bg="#f44336", fg="white", font=("segoe ui", 9), relief="flat",
+                         cursor="hand2", padx=8, pady=3).pack(side="left")
+        
+        except Exception as e:
+            tk.Label(notif_list_frame, text=f"Error: {str(e)}", font=("segoe ui", 10),
+                    bg="#f4f6f8", fg="red").pack(pady=20)
+    
+    load_all_notifications()
 
 
 def get_recent_users():
@@ -1079,13 +1245,18 @@ def face_recognition_window():
     
     # Verification state
         # Verification state
-    verify_state = {"in_progress": False, "found": False, "failed": False}
+    verify_state = {"in_progress": False, "found": False, "failed": False, "failed_options_shown": False}
     
     # start the verivication process
     def start_verification():
         """Start face verification for login"""
         if verify_state["in_progress"]:
             return
+        
+        # Reset failed options flag so we can show try again button on next failure
+        verify_state["failed_options_shown"] = False
+        verify_state["failed"] = False
+        verify_state["found"] = False
         
         if not FACE_RECOGNITION_AVAILABLE:
             show_error_message("OpenCV not installed. Using manual login instead.")
@@ -1199,6 +1370,11 @@ def face_recognition_window():
     
     def show_failed_options():
         """Show options when face verification fails - shown only once"""
+        # Only show if we haven't already shown failed options
+        if verify_state.get("failed_options_shown"):
+            return
+        verify_state["failed_options_shown"] = True
+        
         try:
             verify_btn.pack_forget()
         except Exception:
@@ -1310,14 +1486,14 @@ def face_recognition_window():
         reg_win = tk.Toplevel(face_win)
         register_window(reg_win)
         reg_win.title("Face Registration")
-        reg_win.geometry("450x300")
+        reg_win.geometry("300x400")
         reg_win.resizable(False, False)
         reg_win.config(bg="#470ca0")
         
         # center window
         reg_win.update_idletasks()
-        w = 450
-        h = 300
+        w = 300
+        h = 400
         x_pos = (reg_win.winfo_screenwidth() // 2) - (w // 2)
         y_pos = (reg_win.winfo_screenheight() // 2) - (h // 2)
         reg_win.geometry(f"{w}x{h}+{x_pos}+{y_pos}")
@@ -1605,6 +1781,100 @@ def login_window(prefill_username=None):
         width=35
     )
     password_entry.pack(ipadx=12, ipady=6, pady=3)
+    
+    # Forgotten password link
+    def open_forgotten_password():
+        """Open forgotten password window"""
+        fpw = tk.Toplevel(login_win)
+        register_window(fpw)
+        fpw.title("Reset Password")
+        fpw.geometry("450x400")
+        fpw.configure(bg="#E6E1E1")
+        fpw.resizable(False, False)
+        
+        # Center window
+        fpw.update_idletasks()
+        w = 450
+        h = 400
+        x = (fpw.winfo_screenwidth() // 2) - (w // 2)
+        y = (fpw.winfo_screenheight() // 2) - (h // 2)
+        fpw.geometry(f"{w}x{h}+{x}+{y}")
+        
+        tk.Label(fpw, text="Reset Your Password", font=("segoe ui", 14, "bold"), bg="#E6E1E1", fg="#1a3a52").pack(pady=15)
+        
+        tk.Label(fpw, text="Enter your username:", font=("segoe ui", 10), bg="#E6E1E1").pack(pady=10)
+        user_entry = tk.Entry(fpw, font=("segoe ui", 10), bg="white", width=35)
+        user_entry.pack(padx=20, pady=5)
+        
+        tk.Label(fpw, text="New Password:", font=("segoe ui", 10), bg="#E6E1E1").pack(pady=(15, 5))
+        pwd_entry = tk.Entry(fpw, show="*", font=("segoe ui", 10), bg="white", width=35)
+        pwd_entry.pack(padx=20, pady=5)
+        
+        strength_label = tk.Label(fpw, text="", font=("segoe ui", 8), bg="#E6E1E1")
+        strength_label.pack(pady=2)
+        
+        def check_strength(*args):
+            pwd = pwd_entry.get()
+            if pwd:
+                is_valid, msg = validate_password_strength(pwd)
+                if is_valid:
+                    strength_label.config(text="✓ " + msg, fg="#2E7D32")
+                else:
+                    strength_label.config(text="✗ " + msg, fg="#C62828")
+            else:
+                strength_label.config(text="")
+        
+        pwd_entry.bind("<KeyRelease>", check_strength)
+        
+        tk.Label(fpw, text="Confirm Password:", font=("segoe ui", 10), bg="#E6E1E1").pack(pady=(15, 5))
+        pwd_confirm = tk.Entry(fpw, show="*", font=("segoe ui", 10), bg="white", width=35)
+        pwd_confirm.pack(padx=20, pady=5)
+        
+        def reset_password():
+            username = user_entry.get().strip()
+            new_pwd = pwd_entry.get()
+            conf_pwd = pwd_confirm.get()
+            
+            if not all([username, new_pwd, conf_pwd]):
+                show_error_message("All fields are required")
+                return
+            
+            if new_pwd != conf_pwd:
+                show_error_message("Passwords do not match")
+                return
+            
+            if len(new_pwd) < 8:
+                show_error_message("Password must be at least 8 characters")
+                return
+            
+            try:
+                cursor.execute("SELECT username FROM users WHERE username=?", (username,))
+                if not cursor.fetchone():
+                    show_error_message("Username not found")
+                    return
+                
+                new_hash = hash_password(new_pwd)
+                cursor.execute("UPDATE users SET password=? WHERE username=?", (new_hash, username))
+                conn.commit()
+                show_success_message("Password reset successful! You can now login.")
+                fpw.destroy()
+            except Exception as e:
+                show_error_message(f"Error resetting password: {e}")
+        
+        user_entry.bind("<Return>", lambda e: pwd_entry.focus())
+        pwd_entry.bind("<Return>", lambda e: pwd_confirm.focus())
+        pwd_confirm.bind("<Return>", lambda e: reset_password())
+        
+        tk.Button(fpw, text="Reset Password", command=reset_password, bg="#2196F3", fg="white", font=("segoe ui", 11, "bold")).pack(pady=15)
+    
+    forgot_frame = tk.Frame(login_win, bg="#470ca0")
+    forgot_frame.pack(pady=3)
+    
+    tk.Label(forgot_frame, text="Forgot password? ", font=("segoe ui", 9), bg="#470ca0", fg="white").pack(side="left")
+    forgot_link = tk.Label(forgot_frame, text="🔐 Click here", font=("segoe ui", 9, "bold", "underline"), bg="#470ca0", fg="#FFD700", cursor="hand2")
+    forgot_link.pack(side="left")
+    forgot_link.bind("<Button-1>", lambda e: open_forgotten_password())
+
 
     # If caller prefills username (recent user window), apply it
     try:
@@ -1673,6 +1943,9 @@ def login_window(prefill_username=None):
                 start_polling()
             except Exception:
                 pass
+
+            # WebSocket chat functionality removed
+            pass
         else:
             show_error_message("Invalid username or password.")
 
@@ -1864,8 +2137,8 @@ def signup_window():
 
     tk.Label(signup, text="Password:", font=("segoe", 10, "bold"), bg="#c9c9c9").pack(ipady=7, pady=10)
     entry_password = tk.Entry(signup, bg="#c9c9c9", show="*", font=("segoe", 10))
-    entry_password.pack(ipadx=20)
-    
+    entry_password.pack(ipadx=20, pady=5)
+
     strength_label = tk.Label(signup, text="", font=("segoe", 8), bg="#c9c9c9")
     strength_label.pack(pady=2)
     
@@ -2148,8 +2421,25 @@ def refresh_kpis():
         except Exception:
             revenue = 0
 
-        # pending payments/tasks
-        pending_payments = get_count("SELECT COUNT(*) FROM invoices WHERE status!='Paid'")
+        # pending payments - only count unpaid invoices
+        pending_payments = get_count("SELECT COUNT(*) FROM invoices WHERE status='Unpaid'")
+
+        # Calculate average stay based on currently checked-in guests
+        try:
+            conn2 = connect_to_database(); cur2 = conn2.cursor()
+            cur2.execute("""
+                SELECT COUNT(*) FROM guest_bookings 
+                WHERE status='Checked In'
+            """)
+            checked_in = cur2.fetchone()[0] if cur2.fetchone() else 0
+            conn2.close()
+            
+            if checked_in > 0:
+                average_stay = f"{checked_in} guests"
+            else:
+                average_stay = "0 guests"
+        except Exception:
+            average_stay = "0 guests"
 
         # staff/receptionist metrics (best-effort derived)
         active_bookings = get_count("SELECT COUNT(*) FROM guest_bookings WHERE status='Active'")
@@ -2169,9 +2459,11 @@ def refresh_kpis():
             if 'Occupancy Rate' in kpi_labels:
                 kpi_labels['Occupancy Rate'].config(text=str(occupancy_rate))
             if 'Revenue' in kpi_labels:
-                kpi_labels['Revenue'].config(text=f"{revenue}")
+                kpi_labels['Revenue'].config(text=f"${revenue}")
             if 'Pending Tasks' in kpi_labels:
                 kpi_labels['Pending Tasks'].config(text=str(pending_payments))
+            if 'Pending Payments' in kpi_labels:
+                kpi_labels['Pending Payments'].config(text=str(pending_payments))
 
             if 'Room Requests' in kpi_labels:
                 kpi_labels['Room Requests'].config(text=str(active_bookings))
@@ -2179,6 +2471,8 @@ def refresh_kpis():
                 kpi_labels['Check-ins Today'].config(text=str(today_checkins))
             if 'Messages' in kpi_labels:
                 kpi_labels['Messages'].config(text=str(unread_msgs))
+            if 'Average stay' in kpi_labels:
+                kpi_labels['Average stay'].config(text=average_stay)
     except Exception:
         pass
 
@@ -2223,7 +2517,35 @@ today_checkins = get_count(
     (today,)
 )
 
+# Calculate revenue from paid invoices
+try:
+    conn2 = connect_to_database(); cur2 = conn2.cursor()
+    cur2.execute("SELECT COALESCE(SUM(amount),0) FROM invoices WHERE status='Paid'")
+    rev_row = cur2.fetchone()
+    revenue = rev_row[0] if rev_row and rev_row[0] is not None else 0
+    conn2.close()
+except Exception:
+    revenue = 0
+
+# Get pending payments count
+pending_payments = get_count("SELECT COUNT(*) FROM invoices WHERE status='Unpaid'")
+
+# Calculate average stay based on currently checked-in guests
+try:
+    conn2 = connect_to_database(); cur2 = conn2.cursor()
+    cur2.execute("""
+        SELECT COUNT(*) FROM guest_bookings 
+        WHERE status='Checked In'
+    """)
+    result = cur2.fetchone()
+    checked_in = result[0] if result and result[0] else 0
+    conn2.close()
+    average_stay = f"{checked_in} guests" if checked_in > 0 else "0 guests"
+except Exception:
+    average_stay = "0 guests"
+
 def logout():
+    global current_user, current_user_role
     if confirm_action("Are you sure you want to logout?"):
         try:
             if current_user:
@@ -2231,7 +2553,6 @@ def logout():
         except Exception:
             pass
         # clear session
-        current_user, current_user_role
         current_user = None
         current_user_role = None
         try:
@@ -2254,6 +2575,8 @@ def logout():
         except Exception:
             pass
         root.withdraw()
+        # Show login window
+        face_recognition_window()
         login_window()
 
 # ===== GUESTS WINDOW =====
@@ -2275,47 +2598,46 @@ def guests_window():
         add_win = tk.Toplevel(guests_win)
         register_window(add_win)
         add_win.title("Add Guest")
-        add_win.geometry("400x400")
+        add_win.geometry("400x320")
         
         tk.Label(add_win, text="Guest Name:").pack(pady=5)
         guest_name_entry = tk.Entry(add_win)
         guest_name_entry.pack(pady=5)
         
-        tk.Label(add_win, text="Room Number:").pack(pady=5)
-        room_entry = tk.Entry(add_win)
-        room_entry.pack(pady=5)
+        tk.Label(add_win, text="Phone:").pack(pady=5)
+        phone_entry = tk.Entry(add_win)
+        phone_entry.pack(pady=5)
         
-        tk.Label(add_win, text="Check-in Date (DD-MM-YYYY):").pack(pady=5)
-        checkin_entry = tk.Entry(add_win)
-        checkin_entry.pack(pady=5)
+        tk.Label(add_win, text="Email:").pack(pady=5)
+        email_entry = tk.Entry(add_win)
+        email_entry.pack(pady=5)
         
-        tk.Label(add_win, text="Check-out Date (DD-MM-YYYY):").pack(pady=5)
-        checkout_entry = tk.Entry(add_win)
-        checkout_entry.pack(pady=5)
-        
-        tk.Label(add_win, text="Status:").pack(pady=5)
-        status_var = tk.StringVar()
-        status_menu = ttk.Combobox(add_win, textvariable=status_var, values=["Active", "Checked Out"], state="readonly")
-        status_menu.pack(pady=5)
+        tk.Label(add_win, text="Address:").pack(pady=5)
+        address_entry = tk.Entry(add_win)
+        address_entry.pack(pady=5)
         
         def save_guest():
             try:
                 guest_name = guest_name_entry.get().strip()
-                room_num = int(room_entry.get())
-                checkin = checkin_entry.get().strip()
-                checkout = checkout_entry.get().strip()
-                status = status_var.get()
+                phone = phone_entry.get().strip()
+                email = email_entry.get().strip()
+                address = address_entry.get().strip()
                 
-                if not all([guest_name, room_num, checkin, checkout, status]):
-                    show_error_message("Please fill all fields")
+                if not guest_name:
+                    show_error_message("Please enter guest name")
                     return
                 
-                total_amount = calculate_total_amount(150, checkin, checkout)
-                cursor.execute("INSERT INTO guest_bookings (guest_name, room_number, check_in_date, check_out_date, status, total_amount) VALUES (?, ?, ?, ?, ?, ?)",
-                              (guest_name, room_num, checkin, checkout, status, total_amount))
+                ts = get_iso_timestamp()
+                cursor.execute("INSERT INTO guests (guest_name, phone, email, address, created_at) VALUES (?, ?, ?, ?, ?)",
+                              (guest_name, phone, email, address, ts))
                 conn.commit()
-                notify_guest_added(guest_name, room_num)
                 show_success_message("Guest added successfully")
+                refresh_guests_list()
+                # Clear form fields
+                guest_name_entry.delete(0, tk.END)
+                phone_entry.delete(0, tk.END)
+                email_entry.delete(0, tk.END)
+                address_entry.delete(0, tk.END)
                 
             except Exception as e:
                 show_error_message(f"Error: {str(e)}")
@@ -2331,7 +2653,7 @@ def guests_window():
             tk.Label(list_frame, text="No guests found", bg="#f4f6f8").pack(pady=10)
         else:
             for guest in guests:
-                guest_text = f"Name: {guest[1]} | Room: {guest[2]} | Check-in: {guest[3]} | Status: {guest[5]}"
+                guest_text = f"Name: {guest[1]} | Phone: {guest[2] or 'N/A'} | Email: {guest[3] or 'N/A'}"
                 guest_frame = tk.Frame(list_frame, bg="white", relief="solid", bd=1)
                 guest_frame.pack(fill="x", padx=10, pady=5)
                 
@@ -2341,40 +2663,42 @@ def guests_window():
                     edit_win = tk.Toplevel(guests_win)
                     register_window(edit_win)
                     edit_win.title("Edit Guest")
-                    edit_win.geometry("400x400")
+                    edit_win.geometry("400x300")
                     
                     tk.Label(edit_win, text="Guest Name:").pack(pady=5)
                     guest_name_entry = tk.Entry(edit_win)
                     guest_name_entry.insert(0, g[1])
                     guest_name_entry.pack(pady=5)
                     
-                    tk.Label(edit_win, text="Room Number:").pack(pady=5)
-                    room_entry = tk.Entry(edit_win)
-                    room_entry.insert(0, str(g[2]))
-                    room_entry.pack(pady=5)
+                    tk.Label(edit_win, text="Phone:").pack(pady=5)
+                    phone_entry = tk.Entry(edit_win)
+                    phone_entry.insert(0, g[2] or "")
+                    phone_entry.pack(pady=5)
                     
-                    tk.Label(edit_win, text="Check-in Date:").pack(pady=5)
-                    checkin_entry = tk.Entry(edit_win)
-                    checkin_entry.insert(0, g[3])
-                    checkin_entry.pack(pady=5)
+                    tk.Label(edit_win, text="Email:").pack(pady=5)
+                    email_entry = tk.Entry(edit_win)
+                    email_entry.insert(0, g[3] or "")
+                    email_entry.pack(pady=5)
                     
-                    tk.Label(edit_win, text="Check-out Date:").pack(pady=5)
-                    checkout_entry = tk.Entry(edit_win)
-                    checkout_entry.insert(0, g[4])
-                    checkout_entry.pack(pady=5)
-                    
-                    tk.Label(edit_win, text="Status:").pack(pady=5)
-                    status_var = tk.StringVar(value=g[5])
-                    status_menu = ttk.Combobox(edit_win, textvariable=status_var, values=["Active", "Checked Out"], state="readonly")
-                    status_menu.pack(pady=5)
+                    tk.Label(edit_win, text="Address:").pack(pady=5)
+                    address_entry = tk.Entry(edit_win)
+                    address_entry.insert(0, g[4] or "")
+                    address_entry.pack(pady=5)
                     
                     def save_changes():
                         try:
-                            new_room = int(room_entry.get())
-                            new_checkin = checkin_entry.get().strip()
-                            new_checkout = checkout_entry.get().strip()
-                            new_status = status_var.get()
-                            update_guest(g[1], new_room, new_checkin, new_checkout, new_status, g[6])
+                            new_name = guest_name_entry.get().strip()
+                            new_phone = phone_entry.get().strip()
+                            new_email = email_entry.get().strip()
+                            new_address = address_entry.get().strip()
+                            
+                            if not new_name:
+                                show_error_message("Please enter guest name")
+                                return
+                            
+                            cursor.execute("UPDATE guests SET guest_name=?, phone=?, email=?, address=? WHERE guest_id=?",
+                                          (new_name, new_phone, new_email, new_address, g[0]))
+                            conn.commit()
                             edit_win.destroy()
                             refresh_guests_list()
                         except Exception as e:
@@ -2403,193 +2727,12 @@ def guests_window():
     
     canvas.pack(side="left", fill="both", expand=True, padx=10)
     scrollbar.pack(side="right", fill="y")
+
+# ===== ACTIVE MENU HIGHLIGHT =====
     
-    refresh_guests_list()
 
 
-def chat_window():
-    cw = tk.Toplevel(root)
-    register_window(cw)
-    cw.title("Messaging")
-    cw.geometry("1000x550")
-    cw.configure(bg="#f0f0f0")
-
-    # left: users list with border
-    users_label = tk.Label(cw, text="Users Online", font=("segoe ui", 12, "bold"), bg="#112439", fg=COLOR_GOLD)
-    users_label.pack(side="top", fill="x", padx=2, pady=2)
-    
-    users_frame = tk.Frame(cw, width=280, bg="#f0f0f0", relief="solid", bd=2)
-    users_frame.pack(side="left", fill="y", padx=5, pady=5)
-    users_frame.pack_propagate(False)
-
-    users_listbox = tk.Listbox(users_frame, height=20, width=35, selectmode="browse",
-                              font=("segoe ui", 10), bg="white", relief="flat", bd=0)
-    users_listbox.pack(fill="both", expand=True, padx=8, pady=8)
-    
-    # Store current selection to prevent deselection
-    current_selection = [None]
-
-    # helper to parse username from display text reliably
-    def parse_username_from_display(raw):
-        try:
-            lpar = raw.find('')
-            if lpar != -1:
-                before = raw[:lpar].strip()
-                parts = before.split()
-                if len(parts) >= 2:
-                    return parts[1]
-                return before
-        except Exception:
-            pass
-        return raw
-
-    # load users with online/offline indicator
-    try:
-        cursor.execute("SELECT username, role, last_active FROM users")
-        users = cursor.fetchall()
-        for u in users:
-            last_dt = None
-            if u[2]:
-                try:
-                    last_dt = datetime.datetime.fromisoformat(u[2])
-                except Exception:
-                    last_dt = None
-            status_icon = "🔴"
-            try:
-                if last_dt:
-                    delta = (datetime.datetime.utcnow() - last_dt).total_seconds()
-                    if delta <= 180:
-                        status_icon = "🟢"
-                    elif delta <= 1800:
-                        status_icon = "🟡"
-                else:
-                    status_icon = "🔴"
-            except Exception:
-                status_icon = "🔴"
-            last = get_relative_time(last_dt) if last_dt else "never"
-            display_text = f"{status_icon} {u[0]} ({u[1]}) - {last}"
-            users_listbox.insert("end", display_text)
-    except Exception:
-        pass
-
-    # right: conversation with border
-    conv_title = tk.Label(cw, text="Messages", font=("segoe ui", 12, "bold"), bg="#112439", fg=COLOR_GOLD)
-    conv_title.pack(side="top", fill="x", padx=2, pady=2)
-    
-    convo_frame = tk.Frame(cw, bg="white", relief="solid", bd=2)
-    convo_frame.pack(side="right", fill="both", expand=True, padx=5, pady=5)
-
-    messages_box = tk.Text(convo_frame, state="disabled", wrap="word", font=("segoe ui", 10),
-                          bg="white", relief="flat", bd=0)
-    messages_box.pack(fill="both", expand=True, padx=8, pady=8)
-    
-    # Configure tags for message display
-    messages_box.tag_configure("sender", foreground="#112439", font=("segoe ui", 10, "bold"))
-    messages_box.tag_configure("timestamp", foreground="#999999", font=("segoe ui", 8, "italic"))
-    messages_box.tag_configure("read_status", foreground="#34B7F1", font=("segoe ui", 9))
-
-    entry_frame = tk.Frame(convo_frame, bg="white")
-    entry_frame.pack(fill="x", padx=8, pady=8)
-    
-    msg_entry = tk.Entry(entry_frame, font=("segoe ui", 10), bg="#f5f5f5", relief="solid", bd=1)
-    msg_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-
-    def open_convo(event=None):
-        sel = users_listbox.curselection()
-        if not sel:
-            if current_selection[0] is not None:
-                users_listbox.selection_clear(0, 'end')
-                users_listbox.selection_set(current_selection[0])
-            return
-        idx = sel[0]
-        current_selection[0] = idx
-        raw = users_listbox.get(idx)
-        target = parse_username_from_display(raw)
-        if not target:
-            return
-        chat_ui['current_target'] = target
-        chat_ui['users_listbox'] = users_listbox
-        
-        # Get conversation with read status
-        try:
-            cursor.execute("SELECT id, sender, receiver, message, timestamp, is_read FROM messages WHERE (sender=? AND receiver=?) OR (receiver=? AND sender=?) ORDER BY timestamp ASC", (current_user, target, target, current_user))
-            messages = cursor.fetchall()
-        except Exception:
-            messages = []
-        
-        messages_box.config(state="normal")
-        messages_box.delete("1.0", "end")
-        
-        for m in messages:
-            msg_id, sender, receiver, msg_text, ts, is_read = m
-            sender_name = sender
-            is_outgoing = (sender == current_user)
-            
-            try:
-                dt = datetime.datetime.fromisoformat(ts)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=datetime.timezone.utc)
-                ts_display = dt.astimezone(datetime.timezone.utc).strftime("%H:%M:%S")
-            except Exception:
-                ts_display = ts
-            
-            # Format: "You: message (time) ✅✅" or "Name: message (time) ☑️☑️"
-            if is_outgoing:
-                read_status = "✅✅" if is_read else "☑️☑️"
-                messages_box.insert("end", f"You: {msg_text} ({ts_display}) ", "sender")
-                messages_box.insert("end", read_status + "\n", "read_status")
-            else:
-                messages_box.insert("end", f"{sender_name}: {msg_text} ({ts_display})\n", "sender")
-        
-        messages_box.config(state="disabled")
-        chat_ui['messages_box'] = messages_box
-        
-        # Mark received messages as read
-        try:
-            cursor.execute("UPDATE messages SET is_read=1 WHERE receiver=? AND sender=?", (current_user, target))
-            conn.commit()
-        except Exception:
-            pass
-
-    def send_current_message():
-        sel = users_listbox.curselection()
-        if not sel:
-            msg_entry.focus()
-            return
-        idx = sel[0]
-        raw = users_listbox.get(idx)
-        target = parse_username_from_display(raw)
-        if not target:
-            msg_entry.focus()
-            return
-        text = msg_entry.get().strip()
-        if not text:
-            return
-        
-        try:
-            send_message(current_user, target, text)
-            msg_entry.delete(0, "end")
-            # Reload conversation
-            open_convo()
-            # Keep selection highlighted
-            users_listbox.selection_clear(0, 'end')
-            users_listbox.selection_set(idx)
-            msg_entry.focus()
-            
-            # Create notification for recipient
-            create_notification(target, f"New message from {current_user}: {text[:50]}")
-        except Exception as e:
-            print(f"Error sending message: {e}")
-            msg_entry.focus()
-
-    users_listbox.bind("<<ListboxSelect>>", open_convo)
-    msg_entry.bind("<Return>", lambda e: send_current_message())
-    
-    send_btn = tk.Button(entry_frame, text="Send", command=send_current_message, 
-                        bg="#4CAF50", fg="white", font=("segoe ui", 10), relief="raised", bd=2, cursor="hand2", padx=15, pady=5)
-    send_btn.pack(side="right", padx=(5, 0))
-
-# active menu highlight
+# ===== ACTIVE MENU HIGHLIGHT =====
 ACTIVE_BG = "#c9a24d"
 DEFAULT_BG = "#162030"
 
@@ -2658,7 +2801,6 @@ def dashboard_window():
         "Your Tasks": "housekeeping_window",
         "Room Requests": "bookings_window",
         "Maintenance Items": "maintenance_window",
-        "Messages": "chat_window",
         "Check-ins Today": "bookings_window",
         "Pending Bookings": "bookings_window",
         "Guest Inquiries": "guests_window",
@@ -2715,7 +2857,7 @@ def rooms_window():
     cols = ("room_number", "room_type", "room_price", "room_status")
     tree = ttk.Treeview(rw, columns=cols, show='headings')
     for c in cols:
-        tree.heading(c, text=c.replace('_',' ').title())
+        tree.heading(c, text=c.replace('_', ' ').title())
     tree.pack(fill='both', expand=True, padx=10, pady=10)
 
     def load_rooms():
@@ -2741,7 +2883,13 @@ def rooms_window():
             try:
                 cursor.execute("INSERT INTO user_rooms (room_number, room_type, room_price, room_status) VALUES (?, ?, ?, ?)", (int(rn.get()), rt.get(), float(rp.get()), rs.get()))
                 conn.commit()
-                aw.destroy(); load_rooms()
+                show_success_message("Room added successfully")
+                load_rooms()
+                # Clear form fields
+                rn.delete(0, tk.END)
+                rt.set('')
+                rp.delete(0, tk.END)
+                rs.set('')
             except Exception as e:
                 show_error_message(str(e))
         tk.Button(aw, text='Save', command=save).pack(pady=10)
@@ -2758,7 +2906,9 @@ def rooms_window():
         def save():
             try:
                 cursor.execute("UPDATE user_rooms SET room_type=?, room_price=?, room_status=? WHERE room_number=?", (rt.get(), float(rp.get()), rs.get(), int(rn.get())))
-                conn.commit(); ew.destroy(); load_rooms()
+                conn.commit()
+                show_success_message("Room updated successfully")
+                load_rooms()
             except Exception as e:
                 show_error_message(str(e))
         tk.Button(ew, text='Update', command=save).pack(pady=10)
@@ -2790,7 +2940,7 @@ def bookings_window():
     cols = ("booking_id","guest_name","room_number","check_in","check_out","status","total_amount")
     tree = ttk.Treeview(bw, columns=cols, show='headings')
     for c in cols:
-        tree.heading(c, text=c.replace('_',' ').title())
+        tree.heading(c, text=c.replace('_', ' ').title())
     tree.pack(fill='both', expand=True, padx=10, pady=10)
 
     def load_bookings():
@@ -2828,9 +2978,14 @@ def bookings_window():
                 cursor.execute("INSERT INTO guest_bookings (booking_id, guest_name, room_number, check_in_date, check_out_date, status, total_amount) VALUES (?, ?, ?, ?, ?, ?, ?)", (booking_id, guest, room, cind, cout, 'Active', total))
                 conn.commit()
                 notify_new_booking(guest, room, cind, cout)
-                aw.destroy()
+                show_success_message(f"Booking created for {guest}")
                 load_bookings()
                 refresh_kpis()
+                # Clear form fields
+                gn.delete(0, tk.END)
+                rn.set('')
+                ci.delete(0, tk.END)
+                co.delete(0, tk.END)
             except Exception as e:
                 show_error_message(str(e))
         tk.Button(aw, text='Save', command=save, bg='#4CAF50', fg='white').pack(pady=10)
@@ -2853,13 +3008,23 @@ def bookings_window():
         guest_name = item[1]
         room_number = item[2]
         cursor.execute("UPDATE guest_bookings SET status='Checked Out' WHERE booking_id=?", (booking_id,))
-        cursor.execute("UPDATE user_rooms SET room_status='Available' WHERE room_number=?", (room_number,))
+        cursor.execute("UPDATE user_rooms SET room_status='Needs Cleaning' WHERE room_number=?", (room_number,))
+        
+        # Create housekeeping task for room cleaning
+        ts = get_iso_timestamp()
+        cursor.execute("""
+            INSERT INTO housekeeping_tasks (room_number, task_type, status, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (room_number, 'Room Cleaning', 'Pending', ts))
+        
         conn.commit()
         notify_checkout(guest_name, room_number)
+        # Notify housekeeping staff
+        notify_housekeeping_task("Room Cleaning", room_number)
         load_bookings()
         refresh_kpis()
         
-    btnf = tk.Frame(bw); btnf.pack(fill='x')
+    btnf = tk.Frame(bw); btnf.pack(fill='x', padx=10, pady=10)
     tk.Button(btnf, text='New Booking', command=add_booking, bg='#4CAF50', fg='white').pack(side='left', padx=5, pady=5)
     tk.Button(btnf, text='Check In', command=check_in, bg='#2196F3', fg='white').pack(side='left', padx=5, pady=5)
     tk.Button(btnf, text='Check Out', command=check_out, bg='#f57c00', fg='white').pack(side='left', padx=5, pady=5)
@@ -2869,48 +3034,73 @@ def bookings_window():
 def invoices_window():
     iw = tk.Toplevel(root)
     register_window(iw)
-    iw.title("Invoices & Payments")
+    iw.title("💳 Invoices & Payments")
     iw.geometry("850x600")
 
     cols = ("id","booking_id","guest_name","amount","status","created_at")
     tree = ttk.Treeview(iw, columns=cols, show='headings')
     for c in cols:
-        tree.heading(c, text=c.replace('_',' ').title())
+        tree.heading(c, text=c.replace('_', ' ').title())
     tree.pack(fill='both', expand=True, padx=10, pady=10)
+
 
     def load_invoices():
         for r in tree.get_children(): tree.delete(r)
         cursor.execute("SELECT id, booking_id, guest_name, amount, status, created_at FROM invoices ORDER BY id DESC")
         for row in cursor.fetchall(): tree.insert('', 'end', values=row)
+        
+    def generate_invoice_id():
+        invoice = str(random.randint(100000,999999))
+        cursor.execute('SELECT id FROM invoices WHERE id=?', (invoice,))
+        if cursor.fetchone():
+            return generate_invoice_id()
+        return invoice
 
     def create_invoice():
         ci = tk.Toplevel(iw); register_window(ci); ci.title('Create Invoice'); ci.geometry("400x250")
         tk.Label(ci, text='Booking ID').pack(); bid = tk.Entry(ci); bid.pack()
         def save():
             try:
-                b = int(bid.get())
+                b = bid.get().strip()
                 cursor.execute('SELECT guest_name, total_amount FROM guest_bookings WHERE booking_id=?', (b,))
                 r = cursor.fetchone()
                 if not r: show_error_message('Booking not found'); return
                 guest, amt = r
-                ts = datetime.datetime.utcnow().isoformat()
-                cursor.execute('INSERT INTO invoices (booking_id, guest_name, amount, status, created_at) VALUES (?, ?, ?, ?, ?)', (b, guest, amt, 'Unpaid', ts))
+                ts = get_iso_timestamp()
+                inv_id = generate_invoice_id()
+                cursor.execute('INSERT INTO invoices (id, booking_id, guest_name, amount, status, created_at) VALUES (?, ?, ?, ?, ?, ?)', (inv_id, b, guest, amt, 'Unpaid', ts))
                 conn.commit()
                 notify_invoice_created(b, amt)
-                ci.destroy()
+                show_success_message(f'Invoice #{inv_id} created successfully')
                 load_invoices()
+                # Clear form
+                b_id.delete(0, tk.END)
+            except ValueError:
+                show_error_message('Invalid booking ID format')
             except Exception as e:
                 show_error_message(str(e))
         tk.Button(ci, text='Create', command=save, bg='#4CAF50', fg='white').pack(pady=10)
 
     def mark_paid():
-        sel = tree.selection();
-        if not sel: return
+        sel = tree.selection()
+        if not sel:
+            show_error_message("Please select an invoice to mark as paid")
+            return
         item = tree.item(sel[0])['values']
-        cursor.execute("UPDATE invoices SET status='Paid' WHERE id=?", (item[0],))
-        conn.commit(); load_invoices(); create_notification(item[2], f'Invoice {item[0]} marked paid')
+        invoice_id = item[0]
+        status = item[4]
+        if status == "Paid":
+            show_error_message(f"Invoice #{invoice_id} is already marked as Paid")
+            return
+        if not confirm_action(f"Mark invoice #{invoice_id} as paid?"):
+            return
+        cursor.execute("UPDATE invoices SET status='Paid' WHERE id=?", (invoice_id,))
+        conn.commit()
+        tree.item(sel[0], values=(item[0], item[1], item[2], item[3], "Paid", item[5]))
+        create_notification(current_user, f'✅ Invoice #{invoice_id} marked as Paid')
+        show_success_message(f'Invoice #{invoice_id} marked as Paid')
 
-    btnf = tk.Frame(iw); btnf.pack(fill='x')
+    btnf = tk.Frame(iw); btnf.pack(fill='x', padx=10, pady=10)
     tk.Button(btnf, text='Create Invoice', command=create_invoice, bg='#4CAF50', fg='white').pack(side='left', padx=5, pady=5)
     tk.Button(btnf, text='Mark Paid', command=mark_paid, bg='#2196F3', fg='white').pack(side='left', padx=5, pady=5)
     tk.Button(btnf, text='Export PDF', command=lambda: export_selected_invoice(tree), bg='#6a1b9a', fg='white').pack(side='left', padx=5, pady=5)
@@ -2923,7 +3113,7 @@ def export_selected_invoice(tree):
         show_error_message('Select an invoice to export')
         return
     item = tree.item(sel[0])['values']
-    invoice_id = item[000000]
+    invoice_id = item[0]
     export_invoice_pdf(invoice_id)
 
 def export_invoice_pdf(invoice_id):
@@ -3087,14 +3277,256 @@ def reports_window():
 def housekeeping_window():
     hw = tk.Toplevel(root)
     register_window(hw)
-    hw.title("Housekeeping")
-    tk.Label(hw, text="Housekeeping tasks", padx=20, pady=10).pack()
+    hw.title("Housekeeping - Rooms Needing Cleaning")
+    hw.geometry("900x600")
+    hw.configure(bg="#f4f6f8")
+    
+    tk.Label(hw, text="Rooms Needing Cleaning", font=("segoe ui", 16, "bold"), bg="#f4f6f8").pack(pady=10)
+    
+    # Treeview for rooms needing cleaning
+    cols = ("room_number", "room_type", "guest_name", "check_out_date", "task_status", "created_at")
+    tree = ttk.Treeview(hw, columns=cols, show='headings', height=15)
+    for c in cols:
+        tree.heading(c, text=c.replace('_', ' ').title())
+        tree.column(c, width=120)
+    tree.pack(fill='both', expand=True, padx=10, pady=10)
+    
+    def load_cleaning_tasks():
+        for r in tree.get_children():
+            tree.delete(r)
+        try:
+            # Get rooms that just had checkout
+            cursor.execute("""
+                SELECT ht.room_number, ur.room_type, gb.guest_name, gb.check_out_date, ht.status, ht.created_at
+                FROM housekeeping_tasks ht
+                JOIN user_rooms ur ON ht.room_number = ur.room_number
+                LEFT JOIN guest_bookings gb ON ur.room_number = gb.room_number AND gb.status = 'Checked Out'
+                WHERE ht.status != 'Completed'
+                ORDER BY ht.created_at DESC
+            """)
+            for row in cursor.fetchall():
+                tree.insert('', 'end', values=row)
+        except Exception as e:
+            show_error_message(f"Error loading tasks: {str(e)}")
+    
+    def mark_completed():
+        sel = tree.selection()
+        if not sel:
+            show_error_message("Please select a room to mark as cleaned")
+            return
+        item = tree.item(sel[0])['values']
+        room_number = item[0]
+        try:
+            ts = get_iso_timestamp()
+            cursor.execute("UPDATE housekeeping_tasks SET status='Completed', completed_at=? WHERE room_number=? AND status != 'Completed'", (ts, room_number))
+            cursor.execute("UPDATE user_rooms SET room_status='Available' WHERE room_number=?", (room_number,))
+            conn.commit()
+            create_notification(current_user, f"🧹 Room {room_number} cleaning completed")
+            load_cleaning_tasks()
+        except Exception as e:
+            show_error_message(f"Error: {str(e)}")
+    
+    def add_notes():
+        sel = tree.selection()
+        if not sel:
+            show_error_message("Please select a room")
+            return
+        room_number = tree.item(sel[0])['values'][0]
+        
+        nw = tk.Toplevel(hw)
+        register_window(nw)
+        nw.title("Add Notes")
+        nw.geometry("400x300")
+        
+        tk.Label(nw, text=f"Notes for Room {room_number}:", font=("segoe ui", 11, "bold")).pack(pady=10)
+        notes_text = tk.Text(nw, width=45, height=10)
+        notes_text.pack(padx=10, pady=10)
+        
+        def save_notes():
+            notes = notes_text.get("1.0", tk.END).strip()
+            try:
+                cursor.execute("UPDATE housekeeping_tasks SET notes=? WHERE room_number=? AND status != 'Completed'", (notes, room_number))
+                conn.commit()
+                nw.destroy()
+                load_cleaning_tasks()
+                create_notification(current_user, f"📝 Notes added for Room {room_number}")
+            except Exception as e:
+                show_error_message(f"Error: {str(e)}")
+        
+        tk.Button(nw, text="Save Notes", command=save_notes, bg="#4CAF50", fg="white").pack(pady=10)
+    
+    btnf = tk.Frame(hw, bg="#f4f6f8")
+    btnf.pack(fill='x', padx=10, pady=10)
+    tk.Button(btnf, text="Mark Cleaned", command=mark_completed, bg="#4CAF50", fg="white").pack(side='left', padx=5)
+    tk.Button(btnf, text="Add Notes", command=add_notes, bg="#2196F3", fg="white").pack(side='left', padx=5)
+    tk.Button(btnf, text="Refresh", command=load_cleaning_tasks, bg="#FF9800", fg="white").pack(side='left', padx=5)
+    
+    load_cleaning_tasks()
 
 def maintenance_window():
     mw = tk.Toplevel(root)
     register_window(mw)
-    mw.title("Maintenance")
-    tk.Label(mw, text="Maintenance issues", padx=20, pady=10).pack()
+    mw.title("Maintenance Issues")
+    mw.geometry("1000x600")
+    mw.configure(bg="#f4f6f8")
+    
+    tk.Label(mw, text="Maintenance Issues & Complaints", font=("segoe ui", 16, "bold"), bg="#f4f6f8").pack(pady=10)
+    
+    # Treeview for maintenance issues
+    cols = ("issue_id", "room_number", "issue_type", "reported_by", "status", "created_at")
+    tree = ttk.Treeview(mw, columns=cols, show='headings', height=15)
+    for c in cols:
+        tree.heading(c, text=c.replace('_', ' ').title())
+        tree.column(c, width=130)
+    tree.pack(fill='both', expand=True, padx=10, pady=10)
+    
+    def load_issues():
+        for r in tree.get_children():
+            tree.delete(r)
+        try:
+            cursor.execute("""
+                SELECT issue_id, room_number, issue_type, reported_by, status, created_at
+                FROM maintenance_issues
+                WHERE status != 'Fixed'
+                ORDER BY created_at DESC
+            """)
+            for row in cursor.fetchall():
+                tree.insert('', 'end', values=row)
+        except Exception as e:
+            show_error_message(f"Error loading issues: {str(e)}")
+    
+    def view_issue():
+        sel = tree.selection()
+        if not sel:
+            show_error_message("Please select an issue")
+            return
+        item = tree.item(sel[0])['values']
+        issue_id = item[0]
+        
+        try:
+            cursor.execute("SELECT * FROM maintenance_issues WHERE issue_id=?", (issue_id,))
+            issue = cursor.fetchone()
+            if not issue:
+                return
+            
+            vw = tk.Toplevel(mw)
+            register_window(vw)
+            vw.title(f"Issue #{issue_id}")
+            vw.geometry("500x400")
+            
+            info_text = f"""Issue ID: {issue[0]}
+Room: {issue[1] if issue[1] else 'General'}
+Type: {issue[2]}
+Description: {issue[3]}
+Status: {issue[4]}
+Reported By: {issue[5]}
+Created: {issue[6]}
+Resolved: {issue[7] if issue[7] else 'Not resolved yet'}"""
+            
+            tk.Label(vw, text=info_text, font=("segoe ui", 10), justify="left").pack(anchor="w", padx=10, pady=10)
+        except Exception as e:
+            show_error_message(f"Error: {str(e)}")
+    
+    def mark_fixed():
+        sel = tree.selection()
+        if not sel:
+            show_error_message("Please select an issue to mark as fixed")
+            return
+        item = tree.item(sel[0])['values']
+        issue_id = item[0]
+        
+        try:
+            ts = get_iso_timestamp()
+            cursor.execute("UPDATE maintenance_issues SET status='Fixed', resolved_at=? WHERE issue_id=?", (ts, issue_id))
+            
+            # Get issue details for notification
+            cursor.execute("SELECT reported_by, room_number, issue_type FROM maintenance_issues WHERE issue_id=?", (issue_id,))
+            issue_info = cursor.fetchone()
+            
+            conn.commit()
+            
+            # Notify the person who reported the issue
+            if issue_info and issue_info[0]:
+                create_notification(issue_info[0], f"✅ Maintenance Issue #{issue_id} has been fixed - Room {issue_info[1] if issue_info[1] else 'General'}")
+            
+            # Notify all staff
+            cursor.execute("SELECT username FROM users WHERE role='staff'")
+            for user in cursor.fetchall():
+                create_notification(user[0], f"✅ Maintenance Issue #{issue_id} - {issue_info[2] if issue_info else 'Unknown'} is now Fixed")
+            
+            load_issues()
+        except Exception as e:
+            show_error_message(f"Error: {str(e)}")
+    
+    btnf = tk.Frame(mw, bg="#f4f6f8")
+    btnf.pack(fill='x', padx=10, pady=10)
+    tk.Button(btnf, text="View Details", command=view_issue, bg="#2196F3", fg="white").pack(side='left', padx=5)
+    tk.Button(btnf, text="Mark as Fixed", command=mark_fixed, bg="#4CAF50", fg="white").pack(side='left', padx=5)
+    tk.Button(btnf, text="Report Issue", command=lambda: report_maintenance_issue(load_issues), bg="#FF9800", fg="white").pack(side='left', padx=5)
+    
+    load_issues()
+
+def report_maintenance_issue(callback=None):
+    """Allow customers or staff to report maintenance issues"""
+    rw = tk.Toplevel(root)
+    register_window(rw)
+    rw.title("Report Maintenance Issue")
+    rw.geometry("500x500")
+    rw.configure(bg="#f4f6f8")
+    
+    tk.Label(rw, text="Report Maintenance Issue", font=("segoe ui", 14, "bold"), bg="#f4f6f8").pack(pady=10)
+    
+    tk.Label(rw, text="Room Number (optional):", bg="#f4f6f8").pack(anchor="w", padx=20, pady=(10, 0))
+    room_entry = tk.Entry(rw)
+    room_entry.pack(padx=20, pady=5, fill="x")
+    
+    tk.Label(rw, text="Issue Type:", bg="#f4f6f8").pack(anchor="w", padx=20, pady=(10, 0))
+    issue_type = ttk.Combobox(rw, values=["Electrical", "Plumbing", "HVAC", "Furniture", "Appliance", "Other"], state="readonly")
+    issue_type.pack(padx=20, pady=5, fill="x")
+    
+    tk.Label(rw, text="Description:", bg="#f4f6f8").pack(anchor="w", padx=20, pady=(10, 0))
+    desc_text = tk.Text(rw, height=8, width=50)
+    desc_text.pack(padx=20, pady=5, fill="both", expand=True)
+    
+    def submit_issue():
+        try:
+            room = room_entry.get().strip() if room_entry.get().strip() else None
+            issue_t = issue_type.get()
+            desc = desc_text.get("1.0", tk.END).strip()
+            
+            if not issue_t or not desc:
+                show_error_message("Please fill all required fields")
+                return
+            
+            ts = get_iso_timestamp()
+            cursor.execute("""
+                INSERT INTO maintenance_issues 
+                (room_number, issue_type, description, status, reported_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (room, issue_t, desc, "Pending", current_user, ts))
+            conn.commit()
+            
+            # Notify staff
+            cursor.execute("SELECT username FROM users WHERE role='staff'")
+            for user in cursor.fetchall():
+                create_notification(user[0], f"🔧 New Maintenance Issue: {issue_t} - Room {room if room else 'General'}")
+            
+            # Notify admin
+            cursor.execute("SELECT username FROM users WHERE role='admin'")
+            for user in cursor.fetchall():
+                create_notification(user[0], f"🔧 New Maintenance Issue reported by {current_user}")
+            
+            show_success_message("Issue reported successfully")
+            # Clear form
+            room.set('')
+            issue_t_var.set('')
+            desc_text.delete("1.0", tk.END)
+            if callback:
+                callback()
+        except Exception as e:
+            show_error_message(f"Error: {str(e)}")
+    
+    tk.Button(rw, text="Submit Report", command=submit_issue, bg="#4CAF50", fg="white", font=("segoe ui", 11)).pack(pady=10)
 
 def restaurant_window():
     rw = tk.Toplevel(root)
@@ -3143,21 +3575,21 @@ def restaurant_window():
         
         tk.Label(nw, text="Room Number:", bg="#E6E1E1", font=("segoe ui", 10)).pack(pady=5)
         room_entry = tk.Entry(nw, bg="#ffffff", font=("segoe ui", 10))
-        room_entry.pack(ipadx=20, pady=5)
+        room_entry.pack(ipadx=20, pady=5, fill="x")
         
         tk.Label(nw, text="Items Ordered:", bg="#E6E1E1", font=("segoe ui", 10)).pack(pady=5)
         items_entry = tk.Entry(nw, bg="#ffffff", font=("segoe ui", 10))
-        items_entry.pack(ipadx=20, pady=5)
+        items_entry.pack(ipadx=20, pady=5, fill="x")
         
         tk.Label(nw, text="Total Price:", bg="#E6E1E1", font=("segoe ui", 10)).pack(pady=5)
         price_entry = tk.Entry(nw, bg="#ffffff", font=("segoe ui", 10))
-        price_entry.pack(ipadx=20, pady=5)
+        price_entry.pack(ipadx=20, pady=5, fill="x")
         
         tk.Label(nw, text="Status:", bg="#E6E1E1", font=("segoe ui", 10)).pack(pady=5)
         status_var = tk.StringVar(value="Pending")
         status_menu = ttk.Combobox(nw, textvariable=status_var, 
                                   values=["Pending", "Preparing", "Ready", "Delivered", "Cancelled"], 
-                                  state="readonly", font=("segoe ui", 10))
+                                  state="readonly")
         status_menu.pack(ipadx=20, pady=5)
         
         def save_order():
@@ -3178,8 +3610,12 @@ def restaurant_window():
                              (room, items, status, float(price), order_date))
                 conn.commit()
                 show_success_message("Order created successfully")
-                nw.destroy()
                 load_orders()
+                # Clear form
+                room_entry.delete(0, tk.END)
+                items_text.delete("1.0", tk.END)
+                status_var.set('')
+                price_entry.delete(0, tk.END)
             except ValueError:
                 show_error_message("Price must be a valid number")
             except Exception as e:
@@ -3221,8 +3657,9 @@ def restaurant_window():
                              (new_status, order_id))
                 conn.commit()
                 show_success_message("Status updated")
-                uw.destroy()
                 load_orders()
+                # Refresh status display
+                status_var.set(new_status)
             except Exception as e:
                 show_error_message(f"Error: {str(e)}")
         
@@ -3238,148 +3675,355 @@ def restaurant_window():
 def reviews_window():
     rv = tk.Toplevel(root)
     register_window(rv)
-    rv.title("Customer Reviews & Feedback")
-    rv.geometry("850x600")
+    rv.title("Customer Satisfaction & Feedback")
+    rv.geometry("950x650")
     rv.configure(bg="#f4f6f8")
     
-    tk.Label(rv, text="Customer Reviews & Feedback", font=("segoe ui", 16, "bold"), bg="#f4f6f8").pack(pady=10)
+    tk.Label(rv, text="Customer Satisfaction & Feedback", font=("segoe ui", 16, "bold"), bg="#f4f6f8").pack(pady=10)
     
-    # Add new review button
-    btn_frame = tk.Frame(rv, bg="#f4f6f8")
-    btn_frame.pack(fill="x", padx=20, pady=10)
+    # Feedback table
+    cols = ("feedback_id", "booking_id", "guest_name", "type", "rating", "date")
+    tree = ttk.Treeview(rv, columns=cols, show='headings', height=15)
+    for c in cols:
+        tree.heading(c, text=c.replace('_', ' ').title())
+        tree.column(c, width=140)
+    tree.pack(fill='both', expand=True, padx=10, pady=10)
     
-    def add_review():
-        ar = tk.Toplevel(rv)
-        register_window(ar)
-        ar.title("Add Review")
-        ar.geometry("400x450")
-        ar.configure(bg="#E6E1E1")
+    def load_feedback():
+        for r in tree.get_children():
+            tree.delete(r)
+        try:
+            cursor.execute("""
+                SELECT feedback_id, booking_id, guest_name, feedback_type, rating, created_at
+                FROM customer_feedback
+                ORDER BY created_at DESC
+            """)
+            for row in cursor.fetchall():
+                tree.insert('', 'end', values=row)
+        except Exception as e:
+            show_error_message(f"Error: {str(e)}")
+    
+    def view_feedback():
+        sel = tree.selection()
+        if not sel:
+            show_error_message("Please select a feedback")
+            return
+        item = tree.item(sel[0])['values']
+        feedback_id = item[0]
         
-        tk.Label(ar, text="Add Customer Review", font=("segoe ui", 12, "bold"), bg="#E6E1E1").pack(pady=10)
+        try:
+            cursor.execute("SELECT * FROM customer_feedback WHERE feedback_id=?", (feedback_id,))
+            fb = cursor.fetchone()
+            if not fb:
+                return
+            
+            vw = tk.Toplevel(rv)
+            register_window(vw)
+            vw.title(f"Feedback #{feedback_id}")
+            vw.geometry("500x450")
+            
+            info_text = f"""Feedback ID: {fb[0]}
+Booking ID: {fb[1]}
+Guest Name: {fb[2]}
+Type: {fb[3]}
+Rating: {fb[4]} / 5
+Message: {fb[5]}
+Date: {fb[6]}"""
+            
+            tk.Label(vw, text=info_text, font=("segoe ui", 10), justify="left").pack(anchor="w", padx=15, pady=15)
+        except Exception as e:
+            show_error_message(f"Error: {str(e)}")
+    
+    def add_feedback():
+        aw = tk.Toplevel(rv)
+        register_window(aw)
+        aw.title("Add Customer Feedback")
+        aw.geometry("500x550")
+        aw.configure(bg="#f4f6f8")
         
-        tk.Label(ar, text="Booking ID:", bg="#E6E1E1", font=("segoe ui", 10)).pack(pady=5)
-        booking_entry = tk.Entry(ar, bg="#ffffff")
-        booking_entry.pack(ipadx=20, pady=5)
+        tk.Label(aw, text="Add Customer Feedback", font=("segoe ui", 12, "bold"), bg="#f4f6f8").pack(pady=10)
         
-        tk.Label(ar, text="Guest Name:", bg="#E6E1E1", font=("segoe ui", 10)).pack(pady=5)
-        name_entry = tk.Entry(ar, bg="#ffffff")
-        name_entry.pack(ipadx=20, pady=5)
+        tk.Label(aw, text="Booking ID", bg="#f4f6f8").pack(anchor="w", padx=15, pady=(10, 0))
+        booking_entry = tk.Entry(aw)
+        booking_entry.pack(padx=15, fill="x", pady=5)
         
-        tk.Label(ar, text="Rating (1-5):", bg="#E6E1E1", font=("segoe ui", 10)).pack(pady=5)
-        rating_var = tk.StringVar(value="5")
-        rating_menu = ttk.Combobox(ar, textvariable=rating_var, values=["1", "2", "3", "4", "5"], state="readonly")
-        rating_menu.pack(ipadx=20, pady=5)
+        tk.Label(aw, text="Guest Name", bg="#f4f6f8").pack(anchor="w", padx=15, pady=(10, 0))
+        name_entry = tk.Entry(aw)
+        name_entry.pack(padx=15, fill="x", pady=5)
         
-        tk.Label(ar, text="Feedback:", bg="#E6E1E1", font=("segoe ui", 10)).pack(pady=5)
-        feedback_text = tk.Text(ar, height=6, width=35, bg="#ffffff")
-        feedback_text.pack(ipadx=5, ipady=5, padx=10)
+        tk.Label(aw, text="Feedback Type", bg="#f4f6f8").pack(anchor="w", padx=15, pady=(10, 0))
+        type_var = ttk.Combobox(aw, values=["Service Quality", "Cleanliness", "Food Quality", "Staff Behavior", "Room Comfort", "Value for Money", "General"], state="readonly")
+        type_var.pack(padx=15, fill="x", pady=5)
         
-        def save_review():
+        tk.Label(aw, text="Rating (1-5)", bg="#f4f6f8").pack(anchor="w", padx=15, pady=(10, 0))
+        rating_var = ttk.Combobox(aw, values=["1", "2", "3", "4", "5"], state="readonly")
+        rating_var.set("5")
+        rating_var.pack(padx=15, fill="x", pady=5)
+        
+        tk.Label(aw, text="Message", bg="#f4f6f8").pack(anchor="w", padx=15, pady=(10, 0))
+        msg_text = tk.Text(aw, height=8, width=50)
+        msg_text.pack(padx=15, pady=5, fill="both", expand=True)
+        
+        def save():
             try:
                 booking_id = booking_entry.get().strip()
                 guest_name = name_entry.get().strip()
-                rating = rating_var.get()
-                feedback = feedback_text.get("1.0", "end").strip()
+                fb_type = type_var.get()
+                rating = int(rating_var.get()) if rating_var.get() else None
+                message = msg_text.get("1.0", tk.END).strip()
                 
-                if not all([booking_id, guest_name, rating, feedback]):
+                if not all([booking_id, guest_name, fb_type, message]):
                     show_error_message("Please fill all fields")
                     return
                 
-                review_date = datetime.datetime.now().strftime("%d-%m-%Y")
-                cursor.execute("""INSERT INTO reviews (booking_id, guest_name, rating, feedback, review_date) 
-                               VALUES (?, ?, ?, ?, ?)""",
-                             (booking_id, guest_name, int(rating), feedback, review_date))
+                ts = datetime.datetime.utcnow().isoformat()
+                cursor.execute("""
+                    INSERT INTO customer_feedback
+                    (booking_id, guest_name, feedback_type, message, rating, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (booking_id, guest_name, fb_type, message, rating, ts))
                 conn.commit()
-                show_success_message("Review added successfully")
-                ar.destroy()
-                load_reviews()
+                create_notification(current_user, f"💬 New feedback from {guest_name}: {fb_type}")
+                aw.destroy()
+                load_feedback()
             except Exception as e:
                 show_error_message(f"Error: {str(e)}")
         
-        tk.Button(ar, text="Save Review", command=save_review, bg="#4CAF50", fg="white", font=("segoe ui", 11)).pack(pady=15)
+        tk.Button(aw, text="Save Feedback", command=save, bg="#4CAF50", fg="white").pack(pady=15)
     
-    tk.Button(btn_frame, text="Add Customer Review", command=add_review, bg="#4CAF50", fg="white").pack(side="left", padx=5)
+    btnf = tk.Frame(rv, bg="#f4f6f8")
+    btnf.pack(fill='x', padx=10, pady=10)
+    tk.Button(btnf, text="View Feedback", command=view_feedback, bg="#2196F3", fg="white").pack(side='left', padx=5)
+    tk.Button(btnf, text="Add Feedback", command=add_feedback, bg="#4CAF50", fg="white").pack(side='left', padx=5)
     
-    # Reviews list frame
-    canvas = tk.Canvas(rv, bg="#f4f6f8", highlightthickness=0)
-    scrollbar = tk.Scrollbar(rv, orient="vertical", command=canvas.yview)
-    reviews_frame = tk.Frame(canvas, bg="#f4f6f8")
-    
-    reviews_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-    canvas.create_window((0, 0), window=reviews_frame, anchor="nw")
-    canvas.configure(yscrollcommand=scrollbar.set)
-    
-    canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
-    scrollbar.pack(side="right", fill="y")
-    
-    def load_reviews():
-        for widget in reviews_frame.winfo_children():
-            widget.destroy()
-        
-        try:
-            cursor.execute("""SELECT booking_id, guest_name, rating, feedback, review_date 
-                           FROM reviews ORDER BY review_date DESC""")
-            reviews = cursor.fetchall()
-            
-            if not reviews:
-                tk.Label(reviews_frame, text="No reviews yet", bg="#f4f6f8", fg="#999999", 
-                        font=("segoe ui", 10)).pack(pady=20)
-            
-            for review in reviews:
-                booking_id, guest_name, rating, feedback, review_date = review
-                review_card = tk.Frame(reviews_frame, bg="white", relief="solid", bd=1)
-                review_card.pack(fill="x", pady=8, padx=5)
-                
-                # Header with booking id and name
-                header = tk.Frame(review_card, bg="#f0f0f0")
-                header.pack(fill="x", padx=10, pady=5)
-                tk.Label(header, text=f"Booking #{booking_id} - {guest_name}", 
-                        font=("segoe ui", 10, "bold"), bg="#f0f0f0").pack(anchor="w", side="left")
-                tk.Label(header, text=review_date, font=("segoe ui", 9, "italic"), 
-                        bg="#f0f0f0", fg="#666666").pack(anchor="e", side="right")
-                
-                # Rating
-                stars = "⭐" * int(rating)
-                tk.Label(review_card, text=f"Rating: {stars} ({rating}/5)", 
-                        font=("segoe ui", 9, "bold"), bg="white").pack(anchor="w", padx=10)
-                
-                # Feedback text
-                tk.Label(review_card, text=feedback, font=("segoe ui", 9), bg="white", 
-                        wraplength=780, justify="left").pack(anchor="w", padx=10, pady=5)
-        except Exception as e:
-            tk.Label(reviews_frame, text=f"Error loading reviews: {e}", bg="#f4f6f8", 
-                    fg="red", font=("segoe ui", 10)).pack(pady=20)
-    
-    load_reviews()
+    load_feedback()
 
 def loyalty_window():
     lv = tk.Toplevel(root)
     register_window(lv)
     lv.title("Loyalty Program Management")
-    lv.geometry("800x500")
+    lv.geometry("1000x650")
     lv.configure(bg="#f4f6f8")
     
-    tk.Label(lv, text="Loyalty Program", font=("segoe ui", 16, "bold"), bg="#f4f6f8").pack(pady=10)
+    tk.Label(lv, text="Loyalty Program Management", font=("segoe ui", 16, "bold"), bg="#f4f6f8").pack(pady=10)
+    
+    # Create notebook for tabs
+    notebook = ttk.Notebook(lv)
+    notebook.pack(fill="both", expand=True, padx=10, pady=10)
+    
+    # Members tab
+    members_frame = tk.Frame(notebook, bg="#f4f6f8")
+    notebook.add(members_frame, text="Members")
     
     # Members table
-    cols = ("member_id", "name", "tier", "points", "joined")
-    tree = ttk.Treeview(lv, columns=cols, show='headings', height=15)
+    cols = ("member_id", "name", "tier", "points", "amount_spent", "joined")
+    tree = ttk.Treeview(members_frame, columns=cols, show='headings', height=12)
     for c in cols:
         tree.heading(c, text=c.replace('_', ' ').title())
-        tree.column(c, width=100)
+        tree.column(c, width=140)
     tree.pack(fill='both', expand=True, padx=10, pady=10)
     
-    # Sample data
-    tree.insert('', 'end', values=('LM001', 'John Doe', 'Gold', '5000', '2025-01-01'))
-    tree.insert('', 'end', values=('LM002', 'Jane Smith', 'Silver', '2500', '2025-06-15'))
-    tree.insert('', 'end', values=('LM003', 'Bob Johnson', 'Bronze', '1000', '2025-11-20'))
+    def load_members():
+        for r in tree.get_children():
+            tree.delete(r)
+        try:
+            cursor.execute("SELECT member_id, guest_name, tier, points, amount_spent, joined_date FROM loyalty_members ORDER BY points DESC")
+            for row in cursor.fetchall():
+                tree.insert('', 'end', values=row)
+        except Exception as e:
+            show_error_message(f"Error: {str(e)}")
     
-    # Action buttons
-    btn_frame = tk.Frame(lv, bg="#f4f6f8")
-    btn_frame.pack(fill="x", padx=10, pady=10)
-    tk.Button(btn_frame, text="Add Member", bg="#4CAF50", fg="white").pack(side="left", padx=5)
-    tk.Button(btn_frame, text="Award Points", bg="#FF9800", fg="white").pack(side="left", padx=5)
-    tk.Button(btn_frame, text="Redeem Rewards", bg="#9C27B0", fg="white").pack(side="left", padx=5)
+    def add_member():
+        aw = tk.Toplevel(lv)
+        register_window(aw)
+        aw.title("Add Loyalty Member")
+        aw.geometry("400x300")
+        
+        tk.Label(aw, text="Guest Name").pack(pady=5)
+        name_entry = tk.Entry(aw)
+        name_entry.pack(padx=10, fill="x")
+        
+        tk.Label(aw, text="Tier").pack(pady=5)
+        tier_var = ttk.Combobox(aw, values=["Bronze", "Silver", "Gold", "Platinum"], state="readonly")
+        tier_var.pack(padx=10, fill="x")
+        
+        tk.Label(aw, text="Starting Points").pack(pady=5)
+        points_entry = tk.Entry(aw)
+        points_entry.insert(0, "0")
+        points_entry.pack(padx=10, fill="x")
+        
+        def save():
+            try:
+                name = name_entry.get().strip()
+                tier = tier_var.get()
+                points = int(points_entry.get())
+                
+                if not name or not tier:
+                    show_error_message("Please fill all fields")
+                    return
+                
+                ts = get_iso_timestamp()
+                cursor.execute("""
+                    INSERT INTO loyalty_members (guest_name, tier, points, amount_spent, joined_date)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (name, tier, points, 0, ts))
+                conn.commit()
+                create_notification(current_user, f"🎁 Loyalty member {name} added to {tier} tier")
+                aw.destroy()
+                load_members()
+            except Exception as e:
+                show_error_message(f"Error: {str(e)}")
+        
+        tk.Button(aw, text="Save", command=save, bg="#4CAF50", fg="white").pack(pady=15)
+    
+    def award_points():
+        sel = tree.selection()
+        if not sel:
+            show_error_message("Please select a member")
+            return
+        member_id = tree.item(sel[0])['values'][0]
+        
+        aw = tk.Toplevel(lv)
+        register_window(aw)
+        aw.title("Award Points")
+        aw.geometry("400x250")
+        
+        tk.Label(aw, text="Points to Award").pack(pady=10)
+        points_entry = tk.Entry(aw)
+        points_entry.pack(padx=10, fill="x", pady=5)
+        
+        tk.Label(aw, text="Reason").pack(pady=10)
+        reason_entry = tk.Entry(aw)
+        reason_entry.pack(padx=10, fill="x", pady=5)
+        
+        def save():
+            try:
+                points = int(points_entry.get())
+                reason = reason_entry.get().strip()
+                
+                cursor.execute("SELECT guest_name, points FROM loyalty_members WHERE member_id=?", (member_id,))
+                member = cursor.fetchone()
+                if not member:
+                    show_error_message("Member not found")
+                    return
+                
+                new_points = member[1] + points
+                cursor.execute("UPDATE loyalty_members SET points=? WHERE member_id=?", (new_points, member_id))
+                conn.commit()
+                create_notification(current_user, f"🎁 {points} points awarded to {member[0]} - {reason}")
+                aw.destroy()
+                load_members()
+            except Exception as e:
+                show_error_message(f"Error: {str(e)}")
+        
+        tk.Button(aw, text="Award", command=save, bg="#4CAF50", fg="white").pack(pady=10)
+    
+    members_btn_frame = tk.Frame(members_frame, bg="#f4f6f8")
+    members_btn_frame.pack(fill="x", padx=10, pady=5)
+    tk.Button(members_btn_frame, text="Add Member", command=add_member, bg="#4CAF50", fg="white").pack(side="left", padx=5)
+    tk.Button(members_btn_frame, text="Award Points", command=award_points, bg="#FF9800", fg="white").pack(side="left", padx=5)
+    
+    load_members()
+    
+    # Offers tab
+    offers_frame = tk.Frame(notebook, bg="#f4f6f8")
+    notebook.add(offers_frame, text="Special Offers")
+    
+    tk.Label(offers_frame, text="Special Offers for Loyalty Members (Admin Only)", font=("segoe ui", 12, "bold"), bg="#f4f6f8").pack(pady=10)
+    
+    offers_cols = ("offer_id", "offer_name", "discount", "tier", "active", "created_by")
+    offers_tree = ttk.Treeview(offers_frame, columns=offers_cols, show='headings', height=12)
+    for c in offers_cols:
+        offers_tree.heading(c, text=c.replace('_', ' ').title())
+        offers_tree.column(c, width=140)
+    offers_tree.pack(fill='both', expand=True, padx=10, pady=10)
+    
+    def load_offers():
+        for r in offers_tree.get_children():
+            offers_tree.delete(r)
+        try:
+            cursor.execute("SELECT offer_id, offer_name, discount_percentage, valid_for_tier, active, created_by FROM loyalty_offers ORDER BY created_at DESC")
+            for row in cursor.fetchall():
+                offers_tree.insert('', 'end', values=row)
+        except Exception:
+            pass
+    
+    def add_offer():
+        if current_user_role != "Admin" and current_user_role != "admin":
+            show_error_message("Only admin can create offers")
+            return
+        
+        ow = tk.Toplevel(lv)
+        register_window(ow)
+        ow.title("Create New Offer")
+        ow.geometry("500x400")
+        
+        tk.Label(ow, text="Offer Name").pack(pady=5)
+        name_entry = tk.Entry(ow)
+        name_entry.pack(padx=10, fill="x")
+        
+        tk.Label(ow, text="Description").pack(pady=5)
+        desc_entry = tk.Entry(ow)
+        desc_entry.pack(padx=10, fill="x")
+        
+        tk.Label(ow, text="Discount (%)").pack(pady=5)
+        discount_entry = tk.Entry(ow)
+        discount_entry.pack(padx=10, fill="x")
+        
+        tk.Label(ow, text="Valid for Tier").pack(pady=5)
+        tier_var = ttk.Combobox(ow, values=["Bronze", "Silver", "Gold", "Platinum", "All"], state="readonly")
+        tier_var.pack(padx=10, fill="x")
+        
+        def save():
+            try:
+                name = name_entry.get().strip()
+                desc = desc_entry.get().strip()
+                discount = float(discount_entry.get())
+                tier = tier_var.get()
+                
+                if not all([name, desc, discount, tier]):
+                    show_error_message("Please fill all fields")
+                    return
+                
+                ts = get_iso_timestamp()
+                cursor.execute("""
+                    INSERT INTO loyalty_offers 
+                    (offer_name, description, discount_percentage, valid_for_tier, active, created_at, created_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (name, desc, discount, tier, 1, ts, current_user))
+                conn.commit()
+                create_notification(current_user, f"🎁 New loyalty offer created: {name} - {discount}% off")
+                ow.destroy()
+                load_offers()
+            except Exception as e:
+                show_error_message(f"Error: {str(e)}")
+        
+        tk.Button(ow, text="Create Offer", command=save, bg="#4CAF50", fg="white").pack(pady=15)
+    
+    def toggle_offer():
+        sel = offers_tree.selection()
+        if not sel:
+            show_error_message("Please select an offer")
+            return
+        offer_id = offers_tree.item(sel[0])['values'][0]
+        try:
+            cursor.execute("SELECT active FROM loyalty_offers WHERE offer_id=?", (offer_id,))
+            result = cursor.fetchone()
+            if result:
+                new_active = 0 if result[0] else 1
+                cursor.execute("UPDATE loyalty_offers SET active=? WHERE offer_id=?", (new_active, offer_id))
+                conn.commit()
+                create_notification(current_user, f"🎁 Offer status updated")
+                load_offers()
+        except Exception as e:
+            show_error_message(f"Error: {str(e)}")
+    
+    offers_btn_frame = tk.Frame(offers_frame, bg="#f4f6f8")
+    offers_btn_frame.pack(fill="x", padx=10, pady=5)
+    tk.Button(offers_btn_frame, text="Add Offer", command=add_offer, bg="#4CAF50", fg="white").pack(side="left", padx=5)
+    tk.Button(offers_btn_frame, text="Toggle Active", command=toggle_offer, bg="#2196F3", fg="white").pack(side="left", padx=5)
+    
+    load_offers()
 
 def help_center_window():
     hw = tk.Toplevel(root)
@@ -3491,7 +4135,7 @@ def validate_password_strength(password: str) -> tuple:
     if not any(c.isdigit() for c in password):
         return False, "Password must contain at least one number"
     if not any(c in "!@#$%^&*()-_=+[]{}|;:',.<>?/~`" for c in password):
-        return False, "Password must contain at least one special character (!@#$%^&*..)"
+        return False, "Password must contain at least one special character (!@#$%^&..)"
     return True, "Password is strong"
 
 
@@ -3627,8 +4271,10 @@ def contact_support_window():
 def settings_window():
     sw = tk.Toplevel(root)
     register_window(sw)
-    sw.title("Settings")
-    sw.geometry("400x300")
+    sw.title("⚙️ Settings & Preferences")
+    sw.geometry("500x750")
+    sw.configure(bg="#f4f6f8")
+    
     # load settings
     try:
         cursor.execute("SELECT value FROM settings WHERE key='auto_refresh_kpis'")
@@ -3654,10 +4300,93 @@ def settings_window():
                 stop_kpi_refresh()
         except Exception as e:
             show_error_message(f"Error saving settings: {e}")
+    
+    def delete_account():
+        """Delete current user account with confirmation"""
+        if current_user_role == "admin":
+            show_error_message("Cannot delete admin account. Transfer admin role first.")
+            return
+        
+        warn_msg = f"⚠️ DELETE ACCOUNT WARNING!\n\nYou are about to permanently delete account: {current_user}\n\nThis will:\n- Delete your account\n- Clear your messages\n- Remove your profile\n\nThis CANNOT be undone!\n\nContinue?"
+        if not confirm_action(warn_msg):
+            return
+        
+        final_confirm = confirm_action("⚠️ FINAL WARNING!\n\nYour account will be permanently deleted!\n\nConfirm?")
+        if not final_confirm:
+            return
+        
+        try:
+            # Delete user account
+            cursor.execute("DELETE FROM users WHERE username=?", (current_user,))
+            # Delete all messages involving this user
+            cursor.execute("DELETE FROM messages WHERE sender=? OR receiver=?", (current_user, current_user))
+            # Delete notifications
+            cursor.execute("DELETE FROM notifications WHERE username=?", (current_user,))
+            # Delete profile image if exists
+            profile_path = f"profiles/{current_user}.png"
+            if os.path.exists(profile_path):
+                os.remove(profile_path)
+            conn.commit()
+            
+            show_success_message("Account deleted successfully.")
+            sw.destroy()
+            # Logout and return to login
+            logout()
+        except Exception as e:
+            show_error_message(f"Error deleting account: {str(e)}")
+    
+    def factory_reset():
+        if current_user_role != "admin":
+            show_error_message("Only admins can perform factory reset")
+            return
+        
+        warn_msg = "⚠️ FACTORY RESET WARNING!\n\nThis will DELETE ALL:\n- Guest Bookings\n- Invoices\n- Messages\n- Housekeeping Tasks\n- Maintenance Issues\n- Customer Feedback\n- Loyalty Members\n- Restaurant Orders\n- All Notifications\n\nThis CANNOT be undone!\n\nContinue?"
+        if not confirm_action(warn_msg):
+            return
+        
+        final_confirm = confirm_action("⚠️ This is your FINAL WARNING!\n\nAll data will be permanently deleted!\n\nType to confirm you understand.")
+        if not final_confirm:
+            return
+        
+        try:
+            # Delete all KPI activities
+            cursor.execute("DELETE FROM guest_bookings")
+            cursor.execute("DELETE FROM invoices")
+            cursor.execute("DELETE FROM messages")
+            cursor.execute("DELETE FROM housekeeping_tasks")
+            cursor.execute("DELETE FROM maintenance_issues")
+            cursor.execute("DELETE FROM customer_feedback")
+            cursor.execute("DELETE FROM loyalty_members")
+            cursor.execute("DELETE FROM restaurant_orders")
+            cursor.execute("DELETE FROM notifications")
+            conn.commit()
+            
+            # Notify all users
+            cursor.execute("SELECT username FROM users WHERE role != 'admin'")
+            for user in cursor.fetchall():
+                create_notification(user[0], "🔄 System has been factory reset by admin. All data cleared.")
+            
+            show_success_message("Factory Reset Completed!\nAll KPI activities and notifications have been cleared.")
+            sw.destroy()
+        except Exception as e:
+            show_error_message(f"Error during factory reset: {e}")
 
-    tk.Checkbutton(sw, text="Auto-refresh KPI cards", variable=auto_refresh).pack(anchor='w', pady=10, padx=10)
-    tk.Checkbutton(sw, text="Enable notifications", variable=notif_enabled).pack(anchor='w', pady=10, padx=10)
-    tk.Button(sw, text="Save", command=save_settings, bg="#2196F3", fg="white").pack(pady=20)
+    # Application Settings Section
+    tk.Label(sw, text="Application Settings", font=("segoe ui", 12, "bold"), bg="#f4f6f8", fg="#1a3a52").pack(anchor='w', pady=(10, 5), padx=10)
+    tk.Checkbutton(sw, text="Auto-refresh KPI cards", variable=auto_refresh, bg="#f4f6f8", font=("segoe ui", 10)).pack(anchor='w', pady=5, padx=10)
+    tk.Checkbutton(sw, text="Enable notifications", variable=notif_enabled, bg="#f4f6f8", font=("segoe ui", 10)).pack(anchor='w', pady=5, padx=10)
+    tk.Button(sw, text="💾 Save Settings", command=save_settings, bg="#2196F3", fg="white", font=("segoe ui", 10, "bold"), relief="raised", bd=2).pack(pady=15, padx=10, fill='x')
+    
+    # Account Management Section
+    tk.Label(sw, text="Account Management", font=("segoe ui", 12, "bold"), bg="#f4f6f8", fg="#1a3a52").pack(anchor='w', pady=(20, 5), padx=10)
+    tk.Button(sw, text="🔐 Change Password", command=lambda: show_info_message("Password change feature coming soon"), bg="#FF9800", fg="white", font=("segoe ui", 10, "bold"), relief="raised", bd=2).pack(pady=8, padx=10, fill='x')
+    tk.Button(sw, text="❌ Delete Account", command=delete_account, bg="#f44336", fg="white", font=("segoe ui", 10, "bold"), relief="raised", bd=2).pack(pady=8, padx=10, fill='x')
+    
+    # Admin Tools Section
+    if current_user_role == "admin":
+        tk.Label(sw, text="Admin Tools", font=("segoe ui", 12, "bold"), bg="#f4f6f8", fg="#d32f2f").pack(anchor='w', pady=(20, 5), padx=10)
+        tk.Button(sw, text="🔄 Factory Reset", command=factory_reset, bg="#d32f2f", fg="white", font=("segoe ui", 10, "bold"), relief="raised", bd=2).pack(pady=8, padx=10, fill='x')
+    
     root.mainloop()
 
 
@@ -3782,22 +4511,26 @@ def cards_info(parent, title, value, row, col, bg="#ffffff", fg="#1a1a1a", icon=
 # ===== DASHBOARD KPI CARDS =====
 
 # Row 1
-cards_info(cards_frame, "Today's Revenue", "$1,000", 0, 0, "#2ECC71", fg="#FFFFFF", icon="💰")
-cards_info(cards_frame, "Total Rooms", total_rooms, 0, 1, "#4A90E2", fg="#FFFFFF", icon="🏨")
-cards_info(cards_frame, "Occupied rooms", occupied_rooms, 0, 2, "#F5A623", fg="#FFFFFF", icon="🛏")
-cards_info(cards_frame, "Today Checkins", today_checkins, 0, 3, "#50E3C2", fg="#FFFFFF", icon="📅")
+cards_info(cards_frame, "Today's Revenue", f"${revenue}", 0, 0, "#2ECC71", fg="#FFFFFF", icon="💰")
+cards_info(cards_frame, "Total Rooms", str(total_rooms), 0, 1, "#4A90E2", fg="#FFFFFF", icon="🏨")
+cards_info(cards_frame, "Occupied rooms", str(occupied_rooms), 0, 2, "#F5A623", fg="#FFFFFF", icon="🛏")
+cards_info(cards_frame, "Today Checkins", str(today_checkins), 0, 3, "#50E3C2", fg="#FFFFFF", icon="📅")
 
 # Row 2
-cards_info(cards_frame, "Available Rooms", available_rooms, 1, 0, "#FFFFFF", fg="#1a1a1a", icon=("⏱"))
+cards_info(cards_frame, "Available Rooms", str(available_rooms), 1, 0, "#FFFFFF", fg="#1a1a1a", icon="⏱")
 cards_info(cards_frame, "Customer Satisfaction", "90%", 1, 1, "#49A79B", fg="#ffffff", icon="⭐")
-cards_info(cards_frame, "Loyalty Members", "120", 1, 2, "#FFFFFF", fg="#1a1a1a", icon="🎁")
-cards_info(cards_frame, "Special Offers", "5 Active", 1, 3, "#FFFFFF", fg="#1a1a1a", icon="🎯")
+loyalty_count = get_count("SELECT COUNT(*) FROM loyalty_members")
+cards_info(cards_frame, "Loyalty Members", str(loyalty_count), 1, 2, "#FFFFFF", fg="#1a1a1a", icon="🎁")
+active_offers = get_count("SELECT COUNT(*) FROM loyalty_offers WHERE active=1")
+cards_info(cards_frame, "Special Offers", f"{active_offers} Active", 1, 3, "#FFFFFF", fg="#1a1a1a", icon="🎯")
 
 # Row 3
-cards_info(cards_frame, "Pending payments", "$2,300", 2, 0, "#27775F", fg="#ffffff", icon="🟢")
-cards_info(cards_frame, "Rooms Needing Cleaning", "25", 2, 1, "#FFFFFF", fg="#000000", icon="🧹")
-cards_info(cards_frame, "Maintenance Issues", "12 Open", 2, 2, "#FAB23F", fg="#ffffff", icon="🔧")
-cards_info(cards_frame, "Average stay", "3 days", 2, 3, "#57BA3C", fg="#ffffff", icon="💳")
+cards_info(cards_frame, "Pending payments", str(pending_payments), 2, 0, "#27775F", fg="#ffffff", icon="🟢")
+rooms_needing_cleaning = get_count("SELECT COUNT(*) FROM housekeeping_tasks WHERE status='Pending'")
+cards_info(cards_frame, "Rooms Needing Cleaning", str(rooms_needing_cleaning), 2, 1, "#FFFFFF", fg="#000000", icon="🧹")
+maintenance_open = get_count("SELECT COUNT(*) FROM maintenance_issues WHERE status!='Fixed'")
+cards_info(cards_frame, "Maintenance Issues", f"{maintenance_open} Open", 2, 2, "#FAB23F", fg="#ffffff", icon="🔧")
+cards_info(cards_frame, "Average stay", average_stay, 2, 3, "#57BA3C", fg="#ffffff", icon="💳")
 
 # wire KPI cards to open related windows on click
 try:
@@ -3833,7 +4566,6 @@ menu_defs = [
     (ops_frame, "Manage Rooms", ["admin"], "rooms_window"),
     (ops_frame, "Manage Bookings", ["admin", "staff"], "bookings_window"),
     (ops_frame, "Guests", ["admin", "staff"], "guests_window"),
-    (ops_frame, "Chat", ["admin", "staff", "receptionist"], "chat_window"),
     (ops_frame, "Housekeeping", ["admin", "staff"], "housekeeping_window"),
     (ops_frame, "Maintenance", ["admin", "staff"], "maintenance_window"),
     (ops_frame, "Invoices & Payments", ["admin"], "invoices_window"),
